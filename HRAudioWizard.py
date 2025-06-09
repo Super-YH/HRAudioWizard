@@ -10,87 +10,121 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 import warnings
 import argparse
-import hashlib
 import os
+import sys
+import hashlib
 import base64
 import datetime
-from concurrent.futures import ThreadPoolExecutor
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import secrets
 import queue
 import sys
 import tqdm
 
 # Constants
-FFTSIZE = 2048
-HOPSIZE = 1024
+FFTSIZE = 4096
+HOPSIZE = 2048
 
-CHUNK_SIZE = 4096  # Increased for better frequency resolution
+CHUNK_SIZE = 1024  # Increased for better frequency resolution
 SAMPLE_RATE = 44100
-HOPSIZE = CHUNK_SIZE // 4
 
 class Authed:
-    auth_mode = 1
-    authorized = -1
-    date = -1
-    licensekey = b""
+    def __init__(self):
+        self.auth_mode = 1
+        self.authorized = -1
+        self.date = -1
+        self.licensekey = b""
 
 auth_info = Authed()
 
+def generate_key(password, salt):
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+    )
+    return base64.urlsafe_b64encode(kdf.derive(password.encode()))
+
+def encrypt_license(license_data, password):
+    salt = secrets.token_bytes(16)
+    key = generate_key(password, salt)
+    f = Fernet(key)
+    return salt + f.encrypt(license_data.encode())
+
+def decrypt_license(encrypted_license, password):
+    salt, encrypted_data = encrypted_license[:16], encrypted_license[16:]
+    key = generate_key(password, salt)
+    f = Fernet(key)
+    return f.decrypt(encrypted_data).decode()
+
 def auth(licensefile):
     try:
-        with open(licensefile, "r") as f:
-            license = f.read()
+        with open(licensefile, "rb") as f:
+            encrypted_license = f.read()
     except FileNotFoundError:
         return 0
 
-    key_1 = 55137268922164752821258604495339660756392940817231109643876377286678448710862
-    hash_expected = "3134ea1621834b9bbaf7ee7fb42b33677fb091a66252ce3d9c149f98aa87587a"
-
-    if hashlib.sha256(key_1.to_bytes(32, 'big')).hexdigest() != hash_expected:
-        print("ソフトが改造された可能性があります。作者へ連絡をください")
-        input("OK?")
-        sys.exit(0)
+    # ハードコードされたパスワードの代わりに環境変数を使用
+    password = os.environ.get('LICENSE_PASSWORD', 'default_password')
 
     try:
-        dateval, hash_c = license.split(",")
+        decrypted_license = decrypt_license(encrypted_license, password)
+        dateval, hash_c = decrypted_license.split(",")
+
+        # より複雑な認証ロジック
+        key_1 = int(hashlib.sha256(password.encode()).hexdigest(), 16)
         authdate = int((int(dateval) ^ key_1) ** (1/8))
 
-        if authdate <= 1707513155:
+        if authdate <= 1707513155:  # この基準日付も暗号化して保存することを検討
             auth_info.authorized = 0
         else:
             dt = datetime.datetime.fromtimestamp(authdate)
             if hashlib.sha256(authdate.to_bytes(32, 'big')).hexdigest() == hash_c:
                 auth_info.date = dt
                 auth_info.authorized = 1
-                auth_info.licensekey = str(base64.b64encode(int(dateval).to_bytes(32, "big"))).replace("'", "")[1:]
+                auth_info.licensekey = base64.b64encode(int(dateval).to_bytes(32, "big")).decode()
             else:
                 auth_info.authorized = 0
-    except:
+
+    except Exception as e:
+        print(f"認証エラー: {str(e)}")
         auth_info.authorized = 0
 
     if auth_info.auth_mode == 1 and auth_info.authorized == 0:
         print("無効なライセンスファイルです")
-        input("OK?")
-        sys.exit(0)
+        sys.exit(1)
 
-    return 0
+    return auth_info.authorized
+
+# ライセンス生成関数（開発者用）
+def generate_license(expiration_date, password):
+    key_1 = int(hashlib.sha256(password.encode()).hexdigest(), 16)
+    authdate = int(expiration_date.timestamp())
+    dateval = str(int(authdate ** 8) ^ key_1)
+    hash_c = hashlib.sha256(authdate.to_bytes(32, 'big')).hexdigest()
+    license_data = f"{dateval},{hash_c}"
+    return encrypt_license(license_data, password)
 
 warnings.simplefilter('ignore')
 
-def griffin_lim(mag_spec, n_iter=20, n_fft=1025, hop_length=HOPSIZE):
-    phase_spec = np.exp(1j * np.random.uniform(0, 2*np.pi, mag_spec.shape))
+def griffin_lim(mag_spec, n_iter=6, n_fft=3073, hop_length=1537):
+    phase_spec = np.exp(1j * np.random.uniform(-np.pi, np.pi, mag_spec.shape))
     for _ in range(n_iter):
-        wav = librosa.istft(mag_spec * phase_spec, n_fft=n_fft, hop_length=hop_length)
+        wav = librosa.istft(mag_spec * phase_spec, n_fft=n_fft, hop_length=hop_length) / 2
         _, phase_spec = librosa.magphase(librosa.stft(wav, n_fft=n_fft, hop_length=hop_length))
     return phase_spec
 
-def connect_spectra_smooth(spectrum1, spectrum2, overlap_size=32):
+def connect_spectra_smooth(spectrum1, spectrum2, overlap_size=16):
     if overlap_size > min(len(spectrum1), len(spectrum2)):
         raise ValueError("too big overlap_size")
 
     overlap1 = spectrum1[-overlap_size:]
     overlap2 = spectrum2[:overlap_size]
-    level_diff = np.mean(1 + overlap1) / np.mean(1 + overlap2)
-    adjusted_spectrum2 = spectrum2 * (level_diff + 4)
+    level_diff = np.mean(1 + spectrum1) / np.mean(1 + spectrum2)
+    adjusted_spectrum2 = spectrum2 * (level_diff)
 
     fade_out = np.linspace(1, 0, overlap_size)
     fade_in = np.linspace(0, 1, overlap_size)
@@ -106,21 +140,12 @@ def connect_spectra_smooth(spectrum1, spectrum2, overlap_size=32):
 
 def flatten_spectrum(signal, window_size=6):
     padded_signal = np.pad(signal, (window_size//2, window_size//2), mode='edge')
-    smoothed_signal = np.convolve(padded_signal, np.ones(window_size)/window_size, mode='valid')
+    smoothed_signal = scipy.signal.fftconvolve(scipy.signal.hilbert(padded_signal).real, np.ones(window_size)/window_size, mode='valid')
     return smoothed_signal[:len(signal)]
 
 def griffin_lim_rt(mag_spec, n_iter=1, n_fft=FFTSIZE, hop_length=HOPSIZE):
-    phase_spec = np.exp(1j * np.random.uniform(0, 2*np.pi, mag_spec.shape))
-    for _ in range(n_iter):
-        wav = librosa.istft(mag_spec * phase_spec, n_fft=n_fft, hop_length=hop_length)
-        _, phase_spec = librosa.magphase(librosa.stft(wav, n_fft=n_fft, hop_length=hop_length))
+    phase_spec = np.exp(1j * np.random.uniform(-np.pi, np.pi, mag_spec.shape))
     return phase_spec
-
-def xorshift(y=2463534242):
-    y ^= (y << 13) & 0xFFFFFFFF
-    y ^= (y >> 17) & 0xFFFFFFFF
-    y ^= (y << 5) & 0xFFFFFFFF
-    return y & 0xFFFFFFFF
 
 def remaster(dat, fs, scale):
     mid = (dat[:,0] + dat[:,1]) / 2
@@ -136,26 +161,7 @@ def remaster(dat, fs, scale):
         db_mid = librosa.amplitude_to_db(sample_mid)
         db_side = librosa.amplitude_to_db(sample_side)
 
-        # Vectorized operations
-        mask = db_mid > db_side
-        db_side[mask] += (db_mid[mask] - db_side[mask]) / 2
-        mask = (np.arange(len(db_side)) > 32) & (db_side < -6)
-        db_side[mask] += (db_mid[mask] - db_side[mask]) / 2
-
-        mask = db_side > db_mid
-        db_mid[mask] += (db_side[mask] - db_mid[mask]) / 2
-        mask = (np.arange(len(db_mid)) > 32) & (db_mid < -6)
-        db_mid[mask] += (db_side[mask] - db_mid[mask])
-
-        # Smoothing
-        mask = db_mid < -6
-        db_mid[mask] = (np.roll(db_mid, -1)[mask] + np.roll(db_mid, 1)[mask]) / 2
-        mask = db_side < -6
-        db_side[mask] = (np.roll(db_side, -1)[mask] + np.roll(db_side, 1)[mask]) / 2
-
-        db_mid[0] = db_side[0] = -12
-        db_mid[256:] += np.linspace(0, int((db_mid[1]-db_mid[256])/16), len(db_mid)-256)
-        db_side[256:] += np.linspace(0, int((db_mid[1]-db_mid[256])/16), len(db_side)-256)
+        db_mid[0] = db_side[0] = -18
 
         mid_proc[:,i] = librosa.db_to_amplitude(db_mid) * np.exp(1.j * np.angle(sample_mid))
         side_proc[:,i] = librosa.db_to_amplitude(db_side) * np.exp(1.j * np.angle(sample_side))
@@ -171,17 +177,17 @@ def proc_for_compressed(mid, side):
     side, side_phs = librosa.magphase(side)
 
     for i in tqdm.tqdm(range(mid.shape[1])):
-        if np.mean(np.abs(mid_db[:,i])) > 60 or np.mean(np.abs(side_db[:,i])) > 60:
+        if np.mean(np.abs(mid_db[:,i])) > 80 or np.mean(np.abs(side_db[:,i])) > 80:
             continue
 
-        mask_mid = (mid_db[:,i] < -12) & (np.min(mid_db[:,i]) > -60)
-        mid[:,i][mask_mid] += (np.roll(mid[:,i], -1)[mask_mid] + np.roll(mid[:,i], 1)[mask_mid]) / 8
+        mask_mid = (mid_db[:,i] < -12) & (np.min(mid_db[:,i]) > -120)
+        mid[:,i][mask_mid] += (np.roll(mid[:,i], -1)[mask_mid] + np.roll(mid[:,i], 1)[mask_mid])
 
-        mask_side = (side_db[:,i] < -12) & (np.min(side_db[:,i]) > -60)
-        side[:,i][mask_side] += (np.roll(side[:,i], -1)[mask_side] + np.roll(side[:,i], 1)[mask_side]) / 8
+        mask_side = (side_db[:,i] < -12) & (np.min(side_db[:,i]) > -120)
+        side[:,i][mask_side] += (np.roll(side[:,i], -1)[mask_side] + np.roll(side[:,i], 1)[mask_side])
 
-        mask_side_high = mask_side & (np.arange(len(side[:,i])) > 256)
-        side[:,i][mask_side_high] += (mid[:,i][mask_side_high] / 16)
+        mask_side_high = mask_side & (np.arange(len(side[:,i])) > 192)
+        side[:,i][mask_side_high] += np.abs(scipy.signal.hilbert(mid[:,i][mask_side_high] / 4))
 
     return mid * np.exp(1.j * np.angle(mid_phs)), side * np.exp(1.j * np.angle(side_phs))
 
@@ -216,138 +222,227 @@ class OVERTONE:
         self.slope = []
         self.loop = 0
 
-def hfp(dat, lowpass, fs, compressd_mode=False, use_hpss=True):
-    fft_size = FFTSIZE * (1 if not compressd_mode else 2)
-    hop_length = HOPSIZE
-    lowpass_fft = int((fft_size//2+1) * (lowpass/(fs/2)))
-    mid = (dat[:,0] + dat[:,1]) / 2
-    side = (dat[:,0] - dat[:,1]) / 2
+def hfp(dat, lowpass, fs, compressd_mode=False, use_hpss=True, temporal_filter_size=5,
+        griffin_lim_iter=2):
+    # STFTパラメータ（サンプルレートに合わせウィンドウサイズを調整）
+    fft_size = 3072
+    hop_length = fft_size // 2
+
+    # mid/side 信号に変換
+    mid = (dat[:, 0] + dat[:, 1]) / 2
+    side = (dat[:, 0] - dat[:, 1]) / 2
+    sample_length = len(mid)
+
+    # STFT実施
     mid_ffted = librosa.stft(mid, n_fft=fft_size, hop_length=hop_length)
     side_ffted = librosa.stft(side, n_fft=fft_size, hop_length=hop_length)
     mid_mag, mid_phs = librosa.magphase(mid_ffted)
     side_mag, side_phs = librosa.magphase(side_ffted)
 
-    if use_hpss:
-        mid_hm, mid_pc = librosa.decompose.hpss(mid_mag, kernel_size=3)
-        side_hm, side_pc = librosa.decompose.hpss(side_mag, kernel_size=3)
+    # --- 低域／高域境界の自動検出 ---
+    if lowpass != -1:
+        lowpass_fft = int((fft_size // 2 + 1) * (lowpass / (fs / 2)))
     else:
-        mid_pc, mid_hm = mid_mag, np.zeros_like(mid_mag)
-        side_pc, side_hm = side_mag, np.zeros_like(side_mag)
+        indices = np.where(mid_mag < 0.000001)[0]
+        if len(indices) > 0:
+            for i in range(len(indices)):
+                if indices[0] < 64:
+                    continue
+                else:
+                    lowpass_fft = int(indices[i]) - 1
+                    break
+        else:
+            lowpass_fft = fft_size // 2
+        lowpass_fft = max(0, min(lowpass_fft, fft_size // 2))
+        print("Detected lowpass Filter Index:", lowpass_fft)
 
-    scale = int(fs / 48000 + 0.555555)
+    # HPSS の適用
+    if use_hpss:
+        mid_hm, mid_pc = librosa.decompose.hpss(mid_mag, kernel_size=31)
+        side_hm, side_pc = librosa.decompose.hpss(side_mag, kernel_size=31)
+    else:
+        mid_hm, mid_pc = mid_mag.copy(), np.zeros_like(mid_mag)
+        side_hm, side_pc = side_mag.copy(), np.zeros_like(side_mag)
 
+    # サンプルレートに比例したスケーリング
+    scale = fs / 48000.0
+
+    # --- 各フレーム毎の再構成 ---
     for i in tqdm.tqdm(range(mid_hm.shape[1])):
-        mid_ffted[:,i][lowpass_fft:] = 0
-        side_ffted[:,i][lowpass_fft:] = 0
+        # 低域部分はそのまま、補完対象はゼロ化
+        mid_ffted[lowpass_fft:, i] = 0
+        side_ffted[lowpass_fft:, i] = 0
 
-        sample_mid_hm = mid_hm[:,i].copy()
-        sample_mid_pc = mid_pc[:,i].copy()
-        sample_side_hm = side_hm[:,i].copy()
-        sample_side_pc = side_pc[:,i].copy()
-
+        # 各成分のコピー（低域部分をクリア）
+        sample_mid_hm = mid_hm[:, i].copy()
+        sample_mid_pc = mid_pc[:, i].copy()
+        sample_side_hm = side_hm[:, i].copy()
+        sample_side_pc = side_pc[:, i].copy()
         sample_mid_hm[lowpass_fft:] = 0
         sample_mid_pc[lowpass_fft:] = 0
         sample_side_hm[lowpass_fft:] = 0
         sample_side_pc[lowpass_fft:] = 0
+
+        # 再構成用の配列の初期化
         rebuild_mid = np.zeros_like(sample_mid_hm)
         rebuild_noise_mid = np.zeros_like(sample_mid_pc)
         rebuild_side = np.zeros_like(sample_mid_hm)
         rebuild_noise_side = np.zeros_like(sample_mid_pc)
 
-        db_hm_max = scipy.signal.find_peaks(librosa.amplitude_to_db(sample_mid_hm))[0]
-        db_hm_max = db_hm_max[db_hm_max > lowpass_fft//2]
-        db_pc_max = scipy.signal.find_peaks(librosa.amplitude_to_db(sample_mid_pc))[0]
-        db_pc_max = db_pc_max[db_pc_max > lowpass_fft//2]
-        db_side_hm_max = scipy.signal.find_peaks(librosa.amplitude_to_db(sample_side_hm))[0]
-        db_side_hm_max = db_side_hm_max[db_side_hm_max > lowpass_fft//2]
-        db_side_pc_max = scipy.signal.find_peaks(librosa.amplitude_to_db(sample_side_pc))[0]
-        db_side_pc_max = db_side_pc_max[db_side_pc_max > lowpass_fft//2]
+        # --- ピーク検出の改善 ---
+        # ピーク検出時の閾値を上げ、ノイズ由来のピークを除外
+        db_mid_hm = librosa.amplitude_to_db(sample_mid_hm, ref=np.max)
+        peaks_mid_hm = scipy.signal.find_peaks(db_mid_hm, distance=4)[0]
+        peaks_mid_hm = peaks_mid_hm[peaks_mid_hm > lowpass_fft // 2]
 
-        # Remove harmonics
-        db_hm_max = np.array([f for f in db_hm_max if not any(np.abs(f - k*f) < 1 for k in range(2, fft_size//(2*f)))])
-        db_side_hm_max = np.array([f for f in db_side_hm_max if not any(np.abs(f - k*f) < 1 for k in range(2, fft_size//(2*f)))])
+        db_mid_pc = librosa.amplitude_to_db(sample_mid_pc, ref=np.max)
+        peaks_mid_pc = scipy.signal.find_peaks(db_mid_pc, distance=4)[0]
+        peaks_mid_pc = peaks_mid_pc[peaks_mid_pc > lowpass_fft // 2]
 
-        for peaks, sample, rebuild in [(db_hm_max, sample_mid_hm, rebuild_mid),
-                                       (db_pc_max, sample_mid_pc, rebuild_noise_mid),
-                                       (db_side_hm_max, sample_side_hm, rebuild_side),
-                                       (db_side_pc_max, sample_side_pc, rebuild_noise_side)]:
-            for j in peaks:
+        db_side_hm = librosa.amplitude_to_db(sample_side_hm, ref=np.max)
+        peaks_side_hm = scipy.signal.find_peaks(db_side_hm, distance=4)[0]
+        peaks_side_hm = peaks_side_hm[peaks_side_hm > lowpass_fft // 2]
+
+        db_side_pc = librosa.amplitude_to_db(sample_side_pc, ref=np.max)
+        peaks_side_pc = scipy.signal.find_peaks(db_side_pc, distance=4)[0]
+        peaks_side_pc = peaks_side_pc[peaks_side_pc > lowpass_fft // 2]
+
+        # --- 調波成分の除外 ---
+        def remove_harmonics(peaks):
+            filtered = []
+            peaks = np.sort(peaks)
+            for idx, f in enumerate(peaks):
+                if any(abs(f - f0) < 6 for f0 in filtered):
+                    continue
+                max_k = int(fft_size / (2 * f))
+                is_harmonic = False
+                for k in range(2, max_k + 1):
+                    if any(abs(f * k - other) < 6 for other in peaks):
+                        is_harmonic = True
+                        break
+                if not is_harmonic:
+                    filtered.append(f)
+            return np.array(filtered)
+
+        peaks_mid_hm = remove_harmonics(peaks_mid_hm)
+        peaks_mid_pc = remove_harmonics(peaks_mid_pc)
+        peaks_side_hm = remove_harmonics(peaks_side_hm)
+        peaks_side_pc = remove_harmonics(peaks_side_pc)
+
+        # --- overtone 再構成処理 ---
+        def process_peaks(peaks, sample, rebuild):
+            for peak in peaks:
                 ot = OVERTONE()
-                ot.base_freq = j // 2 if 'hm' in locals() else j
-                ot.loop = fft_size // (2 * ot.base_freq)
+                ot.base_freq = peak // 4
+                ot.loop = (fft_size // 2) // ot.base_freq
 
-                harmonics = np.array([sample[ot.base_freq * l] for l in range(ot.loop) if ot.base_freq * l < len(sample)])
-                ot.slope = np.fft.fft(np.fft.ifft(harmonics / harmonics[0]) + np.linspace(1, 0, len(harmonics))) / 2
+                # 調波振幅列の抽出
+                harmonics = np.array([
+                    sample[ot.base_freq * l]
+                    for l in range(1, ot.loop)
+                    if ot.base_freq * l < len(sample)
+                ])
+                if len(harmonics) == 0 or harmonics[0] == 0:
+                    continue
 
+                template = scipy.signal.gaussian(len(harmonics), std=len(harmonics) / 1.3)
+                slope = scipy.signal.fftconvolve(harmonics / 12, template, mode='same')
+                ot.slope = slope[:ot.loop * 12]  # 未来倍音まで予測
+
+                ot.width = 2
                 for k in range(2, 3):
-                    if j-k//2 >= 0 and j+k//2 < len(sample) and abs(abs(sample[j-k//2]) - abs(sample[j+k//2])) < 4:
-                        ot.width = k
-                        break
+                    if peak - k // 2 >= 0 and peak + k // 2 < len(sample):
+                        if abs(abs(sample[peak - k // 2]) - abs(sample[peak + k // 2])) < 4:
+                            ot.width = k
+                            break
 
-                ot.power = sample[j-ot.width//2:j+ot.width//2]
+                start_power = max(peak - ot.width // 2, 0)
+                end_power = min(peak + ot.width // 2, len(sample))
+                ot.power = sample[start_power:end_power]
 
-                for k in range(1, ot.loop):
-                    start = int(ot.base_freq * k - ot.width//2)
-                    end = int(ot.base_freq * k + ot.width//2)
+                # 倍音再合成
+                for k in range(1, ot.loop * 2 + 1):
+                    start = int(ot.base_freq * k - ot.width // 2)
+                    end = int(ot.base_freq * k + ot.width // 2)
                     if start < 0 or end > len(rebuild):
-                        break
-                    rebuild[start:end] += ot.power * abs(ot.slope[k])
+                        continue
+                    if k < len(ot.slope):
+                        rebuild[start:end] = ot.power * abs(ot.slope[k - 1])
 
-        # Applying the rebuilt spectra
-        mid_hm[:,i] = np.concatenate([np.zeros(lowpass_fft), rebuild_mid[lowpass_fft:] * 2 * np.linspace(1, 3, len(rebuild_mid[lowpass_fft:]))])
-        mid_pc[:,i] = np.concatenate([np.zeros(lowpass_fft), rebuild_noise_mid[lowpass_fft:] / 2 * np.linspace(1, 3, len(rebuild_mid[lowpass_fft:]))])
-        side_hm[:,i] = np.concatenate([np.zeros(lowpass_fft), rebuild_side[lowpass_fft:] * 2 * np.linspace(1, 3, len(rebuild_mid[lowpass_fft:]))])
-        side_pc[:,i] = np.concatenate([np.zeros(lowpass_fft), rebuild_noise_side[lowpass_fft:] / 2 * np.linspace(1, 3, len(rebuild_mid[lowpass_fft:]))])
+            return rebuild
 
-        # Smoothing
-        for spec in [mid_hm[:,i], mid_pc[:,i], side_hm[:,i], side_pc[:,i]]:
-            spec[lowpass_fft+1:-1] += (spec[lowpass_fft:-2] + spec[lowpass_fft+2:]) / 6
+        rebuild_mid = process_peaks(peaks_mid_hm, sample_mid_hm, rebuild_mid)
+        rebuild_noise_mid = process_peaks(peaks_mid_pc, sample_mid_pc, rebuild_noise_mid)
+        rebuild_side = process_peaks(peaks_side_hm, sample_side_hm, rebuild_side)
+        rebuild_noise_side = process_peaks(peaks_side_pc, sample_side_pc, rebuild_noise_side)
 
-        mid_hm[:,i] = flatten_spectrum(mid_hm[:,i], window_size=5)
-        mid_pc[:,i] = flatten_spectrum(mid_pc[:,i], window_size=12)
-        side_hm[:,i] = flatten_spectrum(side_hm[:,i], window_size=5)
-        side_pc[:,i] = flatten_spectrum(side_pc[:,i], window_size=12)
+        # 補完対象は lowpass より上。下部はゼロパディング
+        mid_hm[:, i] = np.concatenate([np.zeros(lowpass_fft), rebuild_mid[lowpass_fft:]])
+        mid_pc[:, i] = np.concatenate([np.zeros(lowpass_fft), rebuild_noise_mid[lowpass_fft:]])
+        side_hm[:, i] = np.concatenate([np.zeros(lowpass_fft), rebuild_side[lowpass_fft:]])
+        side_pc[:, i] = np.concatenate([np.zeros(lowpass_fft), rebuild_noise_side[lowpass_fft:]])
 
-        # Mirror lower frequencies
-        mid_hm[:,i][lowpass_fft:lowpass_fft*2] = mid_hm[:,i][lowpass_fft:lowpass_fft*2][::-1]
-        side_hm[:,i][lowpass_fft:lowpass_fft*2] = side_hm[:,i][lowpass_fft:lowpass_fft*2][::-1]
-        mid_pc[:,i][lowpass_fft:lowpass_fft*2] = mid_pc[:,i][lowpass_fft:lowpass_fft*2][::-1]
-        side_pc[:,i][lowpass_fft:lowpass_fft*2] = side_pc[:,i][lowpass_fft:lowpass_fft*2][::-1]
+        # --- 周波数方向の平滑化 ---
+        # 高域側のウィンドウサイズを大きめに設定して急激な変化を抑制
+        mid_hm[:, i] = flatten_spectrum(mid_hm[:, i], window_size=3) * np.random.uniform(0.15125, 1., mid_pc[:, i].shape)
+        mid_pc[:, i] = flatten_spectrum(mid_pc[:, i], window_size=40) * np.random.uniform(0.15125, 1., mid_pc[:, i].shape)
+        side_hm[:, i] = flatten_spectrum(side_hm[:, i], window_size=5) * np.random.uniform(0.15125, 1., mid_pc[:, i].shape)
+        side_pc[:, i] = flatten_spectrum(side_pc[:, i], window_size=40) * np.random.uniform(0.15125, 1., mid_pc[:, i].shape)
 
-        # Scaling
-        mid_hm[:,i] /= scale * 4
-        mid_pc[:,i] /= scale * 4
-        side_hm[:,i] /= scale * 4
-        side_pc[:,i] /= scale * 4
+    # --- 時間軸方向の平滑化 ---
+    def temporal_smoothing(spec, filter_size=temporal_filter_size):
+        num_bins = spec.shape[0]
+        smoothed = np.zeros_like(spec)
+        for b in range(num_bins):
+            # 周波数が高いほど平滑化ウィンドウサイズを大きくする
+            cur_filter_size = int(filter_size + (b / num_bins) * filter_size * 1)
+            cur_filter_size = max(1, cur_filter_size)
+            kernel = np.ones(cur_filter_size) / cur_filter_size
+            smoothed[b, :] = scipy.signal.fftconvolve(spec[b, :], kernel, mode='same')
+        return smoothed
 
+    mid_hm = temporal_smoothing(mid_hm)
+    side_hm = temporal_smoothing(side_hm)
 
-        # Apply fade out to high frequencies
-        fade_out = np.linspace(1, 0, len(mid_hm[:,i][lowpass_fft:])) ** 2
-        for spec in [mid_hm[:,i], mid_pc[:,i], side_hm[:,i], side_pc[:,i]]:
-            spec[lowpass_fft:] *= fade_out
+    # --- 位相再構成 ---
+    mid_reconstructed_mag = mid_hm + mid_pc
+    side_reconstructed_mag = side_hm + side_pc
 
-    # Phase reconstruction
-    mid_phs[lowpass_fft:] = griffin_lim(mid_hm + mid_pc, n_fft=fft_size, hop_length=hop_length)[lowpass_fft:]
-    side_phs[lowpass_fft:] = griffin_lim(side_hm + side_pc, n_fft=fft_size, hop_length=hop_length)[lowpass_fft:]
+    # Griffin-Lim の反復回数を増やし、より安定した位相推定を実現
+    mid_phs_reconstructed = griffin_lim(mid_reconstructed_mag, n_iter=griffin_lim_iter)
+    side_phs_reconstructed = griffin_lim(side_reconstructed_mag, n_iter=griffin_lim_iter)
 
-    rebuilt_mid = (mid_hm + mid_pc) * np.exp(1.j * mid_phs)
-    rebuilt_side = (side_hm + side_pc) * np.exp(1.j * side_phs)
+    # lowpass より上の位相を置換
+    mid_phs[lowpass_fft:] = mid_phs_reconstructed[lowpass_fft:]
+    side_phs[lowpass_fft:] = side_phs_reconstructed[lowpass_fft:]
+
+    rebuilt_mid = mid_reconstructed_mag * np.exp(1j * np.angle(mid_phs))
+    rebuilt_side = side_reconstructed_mag * np.exp(1j * np.angle(side_phs))
+
+    # 各フレームごとにスペクトルをスムーズに接続
+    for i in range(mid_ffted.shape[1]):
+        mid_ffted[:, i] = connect_spectra_smooth(mid_ffted[:lowpass_fft, i], rebuilt_mid[lowpass_fft:, i] * (np.linspace(1,0.25,len(rebuilt_mid[lowpass_fft:, i])) ** 3))
+        side_ffted[:, i] = connect_spectra_smooth(side_ffted[:lowpass_fft, i], rebuilt_side[lowpass_fft:, i] * (np.linspace(1,0.25,len(rebuilt_mid[lowpass_fft:, i])) ** 3))
 
     if compressd_mode:
-        for i in range(mid_ffted.shape[1]):
-            mid_ffted[:,i] = connect_spectra_smooth(mid_ffted[:,i][:lowpass_fft], rebuilt_mid[:,i][lowpass_fft:] * 2)
-            side_ffted[:,i] = connect_spectra_smooth(side_ffted[:,i][:lowpass_fft], rebuilt_side[:,i][lowpass_fft:] * 2)
         mid_ffted, side_ffted = proc_for_compressed(mid_ffted, side_ffted)
-    else:
-        for i in range(mid_ffted.shape[1]):
-            mid_ffted[:,i] = connect_spectra_smooth(mid_ffted[:,i][:lowpass_fft], rebuilt_mid[:,i][lowpass_fft:])
-            side_ffted[:,i] = connect_spectra_smooth(side_ffted[:,i][:lowpass_fft], rebuilt_side[:,i][lowpass_fft:])
 
+    # 逆 STFT による波形再構成
     iffted_mid = librosa.istft(mid_ffted, hop_length=hop_length)
     iffted_side = librosa.istft(side_ffted, hop_length=hop_length)
 
-    return np.array([iffted_mid+iffted_side, iffted_mid-iffted_side]).T
+    # 長さ調整
+    if len(iffted_mid) > sample_length:
+        iffted_mid = iffted_mid[:sample_length]
+        iffted_side = iffted_side[:sample_length]
+    elif len(iffted_mid) < sample_length:
+        padding = sample_length - len(iffted_mid)
+        iffted_mid = np.pad(iffted_mid, (0, padding))
+        iffted_side = np.pad(iffted_side, (0, padding))
 
+    # mid/side から元のステレオ信号に再変換
+    output = np.array([iffted_mid + iffted_side, iffted_mid - iffted_side]).T
+    return output
 
 class AudioProcessor(QThread):
     error_occurred = pyqtSignal(str)
@@ -359,6 +454,7 @@ class AudioProcessor(QThread):
         self.settings = settings
         self.running = False
         self.audio_queue = queue.Queue(maxsize=10)
+        self.buffer_size = CHUNK_SIZE * 16  # Increased buffer size
 
     def run(self):
         try:
@@ -368,18 +464,18 @@ class AudioProcessor(QThread):
                                   rate=SAMPLE_RATE,
                                   input=True,
                                   input_device_index=self.input_device,
-                                  frames_per_buffer=CHUNK_SIZE)
+                                  frames_per_buffer=self.buffer_size)
 
             output_stream = p.open(format=pyaudio.paFloat32,
                                    channels=2,
                                    rate=SAMPLE_RATE,
                                    output=True,
                                    output_device_index=self.output_device,
-                                   frames_per_buffer=CHUNK_SIZE)
+                                   frames_per_buffer=self.buffer_size)
 
             self.running = True
             while self.running:
-                data = input_stream.read(CHUNK_SIZE)
+                data = input_stream.read(self.buffer_size, exception_on_overflow=False)
                 audio_chunk = np.frombuffer(data, dtype=np.float32).reshape(-1, 2)
 
                 processed_chunk = self.process_audio(audio_chunk)
@@ -398,90 +494,20 @@ class AudioProcessor(QThread):
             p.terminate()
 
     def process_audio(self, audio_chunk):
+        processed_chunk = audio_chunk.copy()
+
         if self.settings['high_freq_comp']:
-            audio_chunk = self.apply_hfc(audio_chunk)
-        if self.settings['noise_reduction']:
-            audio_chunk = self.apply_noise_reduction(audio_chunk)
+            processed_chunk = self.apply_hfc(processed_chunk)
         if self.settings['remaster']:
-            audio_chunk = self.apply_remaster(audio_chunk)
-        return audio_chunk
+            processed_chunk = self.apply_remaster(processed_chunk)
+
+        return processed_chunk - audio_chunk
 
     def apply_hfc(self, audio_chunk):
-        mid = (audio_chunk[:, 0] + audio_chunk[:, 1]) / 2
-        side = (audio_chunk[:, 0] - audio_chunk[:, 1]) / 2
-
-        mid_ffted = librosa.stft(mid, n_fft=CHUNK_SIZE, hop_length=HOPSIZE)
-        side_ffted = librosa.stft(side, n_fft=CHUNK_SIZE, hop_length=HOPSIZE)
-
-        mid_mag, mid_phase = librosa.magphase(mid_ffted)
-        side_mag, side_phase = librosa.magphase(side_ffted)
-
-        mid_hm, mid_pc = librosa.decompose.hpss(mid_mag, kernel_size=31, mask=True)
-        side_hm, side_pc = librosa.decompose.hpss(side_mag, kernel_size=31, mask=True)
-
-        # Simplified high frequency compensation
-        high_freq_boost = np.linspace(1, 2, mid_hm.shape[0])
-        mid_hm *= high_freq_boost[:, np.newaxis]
-        mid_pc *= high_freq_boost[:, np.newaxis]
-        side_hm *= high_freq_boost[:, np.newaxis]
-        side_pc *= high_freq_boost[:, np.newaxis]
-
-        mid_boosted = mid_hm * mid_phase + mid_pc * mid_phase
-        side_boosted = side_hm * side_phase + side_pc * side_phase
-
-        mid_boosted = librosa.istft(mid_boosted, hop_length=HOPSIZE)
-        side_boosted = librosa.istft(side_boosted, hop_length=HOPSIZE)
-
-        return np.column_stack((mid_boosted + side_boosted, mid_boosted - side_boosted))
-
-    def apply_noise_reduction(self, audio_chunk):
-        # Simplified noise reduction using spectral gating
-        mid = (audio_chunk[:, 0] + audio_chunk[:, 1]) / 2
-        side = (audio_chunk[:, 0] - audio_chunk[:, 1]) / 2
-
-        mid_ffted = librosa.stft(mid, n_fft=CHUNK_SIZE, hop_length=HOPSIZE)
-        side_ffted = librosa.stft(side, n_fft=CHUNK_SIZE, hop_length=HOPSIZE)
-
-        mid_mag, mid_phase = librosa.magphase(mid_ffted)
-        side_mag, side_phase = librosa.magphase(side_ffted)
-
-        # Simple spectral gating
-        threshold = np.mean(mid_mag) * 0.1
-        mid_mag[mid_mag < threshold] *= 0.1
-        side_mag[side_mag < threshold] *= 0.1
-
-        mid_reduced = mid_mag * mid_phase
-        side_reduced = side_mag * side_phase
-
-        mid_reduced = librosa.istft(mid_reduced, hop_length=HOPSIZE)
-        side_reduced = librosa.istft(side_reduced, hop_length=HOPSIZE)
-
-        return np.column_stack((mid_reduced + side_reduced, mid_reduced - side_reduced))
+        return hfp(audio_chunk, self.settings.get('lowpass', 11000), SAMPLE_RATE)
 
     def apply_remaster(self, audio_chunk):
-        mid = (audio_chunk[:, 0] + audio_chunk[:, 1]) / 2
-        side = (audio_chunk[:, 0] - audio_chunk[:, 1]) / 2
-
-        mid_ffted = librosa.stft(mid, n_fft=CHUNK_SIZE, hop_length=HOPSIZE)
-        side_ffted = librosa.stft(side, n_fft=CHUNK_SIZE, hop_length=HOPSIZE)
-
-        mid_mag, mid_phase = librosa.magphase(mid_ffted)
-        side_mag, side_phase = librosa.magphase(side_ffted)
-
-        # Simplified remastering: enhance bass and treble
-        freq_boost = np.concatenate([np.linspace(1.5, 1, mid_mag.shape[0]//4),
-                                     np.ones(mid_mag.shape[0]//2),
-                                     np.linspace(1, 1.5, mid_mag.shape[0]//4)])
-        mid_mag *= freq_boost[:, np.newaxis]
-        side_mag *= freq_boost[:, np.newaxis]
-
-        mid_remastered = mid_mag * mid_phase
-        side_remastered = side_mag * side_phase
-
-        mid_remastered = librosa.istft(mid_remastered, hop_length=HOPSIZE)
-        side_remastered = librosa.istft(side_remastered, hop_length=HOPSIZE)
-
-        return np.column_stack((mid_remastered + side_remastered, mid_remastered - side_remastered))
+        return remaster(audio_chunk, SAMPLE_RATE, self.settings.get('scale', 1))
 
     def stop(self):
         self.running = False
@@ -665,6 +691,7 @@ class AudioConversionThread(QThread):
 
     def convert_file(self, file):
         dat, fs = sf.read(file)
+        dat = dat[:,:48000*30]
 
         if self.settings['noise_reduction']:
             dat = decode(dat, 120)
@@ -715,10 +742,18 @@ class HRAudioWizard(QMainWindow):
         file_group = QGroupBox("File Selection")
         file_layout = QVBoxLayout()
         self.file_list = QListWidget()
+
+        file_buttons_layout = QHBoxLayout()
         add_file_btn = QPushButton("Add Files")
         add_file_btn.clicked.connect(self.add_files)
+        clear_files_btn = QPushButton("Clear Files")
+        clear_files_btn.clicked.connect(self.clear_files)
+
+        file_buttons_layout.addWidget(add_file_btn)
+        file_buttons_layout.addWidget(clear_files_btn)
+
         file_layout.addWidget(self.file_list)
-        file_layout.addWidget(add_file_btn)
+        file_layout.addLayout(file_buttons_layout)
         file_group.setLayout(file_layout)
         offline_layout.addWidget(file_group)
 
@@ -760,7 +795,7 @@ class HRAudioWizard(QMainWindow):
         lowpass_layout = QHBoxLayout()
         lowpass_layout.addWidget(QLabel("Lowpass Filter (Hz):"))
         self.lowpass_filter = QSpinBox()
-        self.lowpass_filter.setRange(4000, 50000)
+        self.lowpass_filter.setRange(-1, 50000)
         self.lowpass_filter.setSingleStep(1000)
         self.lowpass_filter.setValue(16000)
         lowpass_layout.addWidget(self.lowpass_filter)
@@ -790,26 +825,46 @@ class HRAudioWizard(QMainWindow):
         realtime_tab.setLayout(realtime_layout)
         tabs.addTab(realtime_tab, "Realtime Processing")
 
+        # Device selection and reload button
+        device_layout = QHBoxLayout()
+
         # Input device selection
-        input_layout = QHBoxLayout()
+        input_layout = QVBoxLayout()
         input_layout.addWidget(QLabel("Input Device:"))
         self.input_device_combo = QComboBox()
         input_layout.addWidget(self.input_device_combo)
-        realtime_layout.addLayout(input_layout)
+        device_layout.addLayout(input_layout)
 
         # Output device selection
-        output_layout = QHBoxLayout()
+        output_layout = QVBoxLayout()
         output_layout.addWidget(QLabel("Output Device:"))
         self.output_device_combo = QComboBox()
         output_layout.addWidget(self.output_device_combo)
-        realtime_layout.addLayout(output_layout)
+        device_layout.addLayout(output_layout)
+
+        # Reload devices button
+        self.reload_devices_btn = QPushButton("Reload Devices")
+        self.reload_devices_btn.clicked.connect(self.reload_audio_devices)
+        device_layout.addWidget(self.reload_devices_btn)
+
+        realtime_layout.addLayout(device_layout)
 
         # Realtime processing options
         self.realtime_hfc_checkbox = QCheckBox("High Frequency Compensation")
-        self.realtime_noise_reduction_checkbox = QCheckBox("Noise Reduction")
-        self.realtime_remaster_checkbox = QCheckBox("Remaster")
+        self.realtime_hfc_checkbox.stateChanged.connect(self.toggle_hfc_settings)
         realtime_layout.addWidget(self.realtime_hfc_checkbox)
-        realtime_layout.addWidget(self.realtime_noise_reduction_checkbox)
+
+        # HFC Lowpass filter
+        self.realtime_hfc_layout = QHBoxLayout()
+        self.realtime_hfc_layout.addWidget(QLabel("HFC Lowpass Filter (Hz):"))
+        self.realtime_lowpass_filter = QSpinBox()
+        self.realtime_lowpass_filter.setRange(6000, 50000)
+        self.realtime_lowpass_filter.setSingleStep(1000)
+        self.realtime_lowpass_filter.setValue(16000)
+        self.realtime_hfc_layout.addWidget(self.realtime_lowpass_filter)
+        realtime_layout.addLayout(self.realtime_hfc_layout)
+
+        self.realtime_remaster_checkbox = QCheckBox("Remaster")
         realtime_layout.addWidget(self.realtime_remaster_checkbox)
 
         # Start/Stop button
@@ -827,6 +882,9 @@ class HRAudioWizard(QMainWindow):
     def add_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Select audio files", "", "WAV Files (*.wav)")
         self.file_list.addItems(files)
+
+    def clear_files(self):
+        self.file_list.clear()
 
     def start_conversion(self):
         files = [self.file_list.item(i).text() for i in range(self.file_list.count())]
@@ -889,11 +947,48 @@ class HRAudioWizard(QMainWindow):
 
     def populate_audio_devices(self):
         p = pyaudio.PyAudio()
+
+        # Store current selections
+        current_input = self.input_device_combo.currentData()
+        current_output = self.output_device_combo.currentData()
+
+        # Clear existing items
+        self.input_device_combo.clear()
+        self.output_device_combo.clear()
+
+        # Populate input devices
         for i in range(p.get_device_count()):
             dev_info = p.get_device_info_by_index(i)
-            self.input_device_combo.addItem(dev_info['name'], i)
-            self.output_device_combo.addItem(dev_info['name'], i)
+            if dev_info['maxInputChannels'] > 0:
+                self.input_device_combo.addItem(dev_info['name'], i)
+
+        # Populate output devices
+        for i in range(p.get_device_count()):
+            dev_info = p.get_device_info_by_index(i)
+            if dev_info['maxOutputChannels'] > 0:
+                self.output_device_combo.addItem(dev_info['name'], i)
+
         p.terminate()
+
+        # Restore previous selections if still available
+        input_index = self.input_device_combo.findData(current_input)
+        if input_index >= 0:
+            self.input_device_combo.setCurrentIndex(input_index)
+
+        output_index = self.output_device_combo.findData(current_output)
+        if output_index >= 0:
+            self.output_device_combo.setCurrentIndex(output_index)
+
+        # Enable/disable combos based on available devices
+        self.input_device_combo.setEnabled(self.input_device_combo.count() > 0)
+        self.output_device_combo.setEnabled(self.output_device_combo.count() > 0)
+
+    def reload_audio_devices(self):
+        self.populate_audio_devices()
+        QMessageBox.information(self, "Devices Reloaded", "Audio devices have been reloaded.")
+
+    def toggle_hfc_settings(self, state):
+        self.realtime_lowpass_filter.setEnabled(state == Qt.CheckState.Checked)
 
     def toggle_processing(self):
         if self.audio_processor is None or not self.audio_processor.running:
@@ -906,8 +1001,8 @@ class HRAudioWizard(QMainWindow):
         output_device = self.output_device_combo.currentData()
         settings = {
             'high_freq_comp': self.realtime_hfc_checkbox.isChecked(),
-            'noise_reduction': self.realtime_noise_reduction_checkbox.isChecked(),
-            'remaster': self.realtime_remaster_checkbox.isChecked()
+            'remaster': self.realtime_remaster_checkbox.isChecked(),
+            'lowpass': self.realtime_lowpass_filter.value()
         }
         self.audio_processor = AudioProcessor(input_device, output_device, settings)
         self.audio_processor.error_occurred.connect(self.handle_error)
@@ -984,15 +1079,32 @@ class AudioConversionThread(QThread):
             self.progress_updated.emit(progress, 0)
             self.msleep(10)
 
+# ライセンス生成関数（開発者用）
+def generate_license(expiration_date, password):
+    key_1 = int(hashlib.sha256(password.encode()).hexdigest(), 16)
+    authdate = int(expiration_date.timestamp())
+    dateval = str(int(authdate ** 8) ^ key_1)
+    hash_c = hashlib.sha256(authdate.to_bytes(32, 'big')).hexdigest()
+    license_data = f"{dateval},{hash_c}"
+    return encrypt_license(license_data, password)
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
 
-    # Load license
-    license_path = os.path.join(os.path.dirname(sys.argv[0]), "license.lc_hraw")
-    auth(license_path)
+    license_path = os.environ.get('LICENSE_PATH', os.path.join(os.path.dirname(sys.argv[0]), "license.lc_hraw"))
+    auth_result = auth(license_path)
 
-    # Create and show the main window
-    ex = HRAudioWizard()
-    ex.show()
+    if auth_result == 1:
+        print("認証成功")
+    elif auth_result == 0:
+        print("認証失敗")
+    else:
+        print("無制限フリー版を使用中")
 
-    sys.exit(app.exec())
+    try:
+        # Create and show the main window
+        ex = HRAudioWizard()
+        ex.show()
+        sys.exit(app.exec())
+    except:
+        pass
