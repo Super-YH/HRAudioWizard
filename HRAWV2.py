@@ -10,6 +10,7 @@ from scipy.linalg import solve_toeplitz
 import librosa
 import mdct
 import soundfile as sf
+# Numbaをインポート
 import numba
 from numba import jit
 from PyQt6.QtWidgets import (
@@ -19,8 +20,15 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 
+# --- Numba JIT-Compiled Helper Functions ---
+
+# nopython=True: 純粋なマシンコードにコンパイルし、Pythonインタプリタを介さないため高速。
+# cache=True: 一度コンパイルした結果をキャッシュし、次回起動時を高速化。
+# fastmath=True: 浮動小数点演算の精度を少し犠牲にして速度を向上させる（オーディオ処理では許容範囲）。
+
 @jit(nopython=True, cache=True, fastmath=True)
 def _numba_tukey_window(window_length, alpha):
+    """Numba互換のTukey窓生成関数"""
     if window_length == 0:
         return np.array([1.0])
     x = np.linspace(0, 1, window_length)
@@ -43,6 +51,7 @@ def _numba_tukey_window(window_length, alpha):
 
 @jit(nopython=True, cache=True, fastmath=True)
 def _numba_apply_pre_echo_suppression(y_rec_padded, hop_length, transient_frames_indices):
+    """Numbaで高速化したプリエコー抑制処理"""
     y_processed = y_rec_padded.copy()
     for frame_idx in transient_frames_indices:
         pre_echo_start_sample = (frame_idx - 1) * hop_length
@@ -57,43 +66,54 @@ def _numba_apply_pre_echo_suppression(y_rec_padded, hop_length, transient_frames
 
 @jit(nopython=True, cache=True, fastmath=True)
 def _numba_apply_compressed_fix_loop(mid_spec, side_spec, threshold_db, high_freq_bin_start):
+    """Numbaで高速化した圧縮音源補正のメインループ"""
     num_bins, num_frames = mid_spec.shape
     
+    # DB変換 (librosa.amplitude_to_dbのNumba版)
     mid_db = 20.0 * np.log10(np.abs(mid_spec) + 1e-9)
     side_db = 20.0 * np.log10(np.abs(side_spec) + 1e-9)
 
     for i in range(num_frames):
+        # Midチャンネルの処理
         mask_mid = (mid_db[:, i] < threshold_db) & (np.min(mid_db[:, i]) > -120)
         for k in np.where(mask_mid)[0]:
             if 0 < k < num_bins - 1:
                 mid_spec[k, i] += (mid_spec[k-1, i] + mid_spec[k+1, i]) / 2
 
+        # Sideチャンネルの処理
         mask_side = (side_db[:, i] < threshold_db) & (np.min(side_db[:, i]) > -120)
         for k in np.where(mask_side)[0]:
             if 0 < k < num_bins - 1:
                 side_spec[k, i] += (side_spec[k-1, i] + side_spec[k+1, i]) / 2
 
+        # Sideチャンネルの高域補強 (ヒルベルト変換の代わりに簡易的なエンベロープを使用)
         mask_side_high_indices = np.where(mask_side & (np.arange(num_bins) > high_freq_bin_start))[0]
         if len(mask_side_high_indices) > 0:
+            # 簡易的なエンベロープとしてMid成分の絶対値を加算
             side_spec[mask_side_high_indices, i] += np.abs(mid_spec[mask_side_high_indices, i] / 4.0)
             
     return mid_spec, side_spec
 
 @jit(nopython=True, cache=True, fastmath=True)
 def _numba_process_channel_dither(channel_data, chunk_size, b, quantization_step, lpc_order):
+    """Numbaで高速化したディザリングのチャンネル処理ループ"""
     num_samples = len(channel_data)
     output = np.zeros(num_samples)
     error_hist = np.zeros(lpc_order + 1)
     
     for n in range(num_samples):
+        # フィルタ係数bはチャンクごとに更新される想定だが、ここでは固定として渡す
+        # この関数は1チャンク分の処理を行うように変更するのがより適切
         error_shaped = np.dot(b[1:], error_hist[:lpc_order])
         
         target_sample = channel_data[n] + error_shaped
         quantized_val = np.round(target_sample / quantization_step) * quantization_step
         
+        # クリッピングは最後に行うのでここでは不要
         output[n] = quantized_val
         
         current_error = quantized_val - target_sample
+        # error_histを更新
         for j in range(lpc_order, 0, -1):
             error_hist[j] = error_hist[j-1]
         error_hist[0] = current_error
@@ -582,7 +602,7 @@ class MainWindow(QMainWindow):
         layout, grid_layout = QVBoxLayout(group), QHBoxLayout()
         sr_layout, bd_layout = QVBoxLayout(), QVBoxLayout()
         sr_layout.addWidget(QLabel("Target Sample Rate:")); bd_layout.addWidget(QLabel("Output Format:"))
-        self.resample_sr_combo = QComboBox(); self.resample_sr_combo.addItems(["44100", "48000", "88200", "96000"]); self.resample_sr_combo.setCurrentText("48000")
+        self.resample_sr_combo = QComboBox(); self.resample_sr_combo.addItems(["32000", "44100", "48000", "88200", "96000"]); self.resample_sr_combo.setCurrentText("48000")
         self.output_bit_depth_combo = QComboBox(); self.output_bit_depth_combo.addItems(["4-bit PCM", "8-bit PCM", "16-bit PCM", "24-bit PCM", "32-bit Float"]); self.output_bit_depth_combo.setCurrentText("24-bit PCM")
         sr_layout.addWidget(self.resample_sr_combo); bd_layout.addWidget(self.output_bit_depth_combo)
         grid_layout.addLayout(sr_layout); grid_layout.addLayout(bd_layout)
