@@ -160,7 +160,7 @@ def connect_spectra_smooth(signal1, signal2, overlap_size=128, is_harm=True):
     level_diff = np.mean(signal1[-overlap_size:]) - np.mean(signal2[:overlap_size])
     signal2_adjusted = signal2 + level_diff
     if np.mean(abs(signal1[-overlap_size:])) < 1e-5: signal2 = np.zeros(len(signal2_adjusted))
-    result = np.concatenate([signal1, signal2_adjusted / 1.5])
+    result = np.concatenate([signal1, abs(scipy.signal.hilbert(new_env[:len(signal2)].real)) * signal2_adjusted / 1.5])
     return result
     
 class OVERTONE:
