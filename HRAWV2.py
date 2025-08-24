@@ -117,15 +117,25 @@ def griffin_lim_mdct(magnitudes, frame_length=2048, hop_length=1024, n_iter=2, t
         mdct_spec = magnitudes * new_phases
     return mdct_spec
     
-def connect_spectra_smooth(signal1, signal2, overlap_size=128, is_harm=True):
-    if overlap_size == 0: return np.concatenate([signal1, signal2])
+def connect_spectra_smooth(signal1, signal2, overlap_size=32, is_harm=True):
+    if overlap_size == 0:
+        return np.concatenate([signal1, signal2])
     env = scipy.signal.hilbert(signal1)
-    new_env = np.hstack([scipy.signal.resample(env[len(env)//4:len(env)//2], len(env)*2), scipy.signal.resample(env[len(env)//4::len(env)//2][::-1], len(env)*2), scipy.signal.resample(env[len(env)//4::len(env)//2], len(env)*4)])
+    new_env = np.hstack([
+        scipy.signal.resample(env[len(env)//4:len(env)//2], len(env)),
+        scipy.signal.resample(env[len(env)//4::len(env)//2][::-1], len(env)),
+        scipy.signal.resample(env[len(env)//4::len(env)//2], len(env)*2), 
+        scipy.signal.resample(env[len(env)//4::len(env)//2][::-1], len(env)*2)
+    ])
+    new_env /= np.min(new_env)
+    new_env = np.clip(np.abs(new_env), -1, 1)
     overlap_size = min(len(signal1), len(signal2), overlap_size)
-    level_diff = np.mean(signal1[-overlap_size:]) - np.mean(signal2[:overlap_size])
-    signal2_adjusted = signal2 + level_diff
-    if np.mean(abs(signal1[-overlap_size:])) < 1e-5: signal2 = np.zeros(len(signal2_adjusted))
-    result = np.concatenate([signal1, 2 * abs(scipy.signal.hilbert(new_env[:len(signal2)].real)) * signal2_adjusted / 1.5])
+    signal2_envelope_adapted = abs((new_env[:len(signal2)].real)) * signal2
+    level_diff = (np.mean(signal1[-overlap_size:])+1e-5) / (np.mean(signal2_envelope_adapted[:overlap_size])+1e-5)
+    signal2_adjusted = signal2_envelope_adapted * level_diff
+    if np.mean(abs(signal1[-overlap_size:])) < 1e-5:
+        signal2_adjusted = np.zeros(len(signal2_adjusted))
+    result = np.concatenate([signal1, signal2_adjusted])
     return result
     
 class OVERTONE:
