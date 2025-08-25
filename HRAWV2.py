@@ -125,7 +125,9 @@ def connect_spectra_smooth(signal1, signal2, overlap_size=32, is_harm=True):
         scipy.signal.resample(env[len(env)//4:len(env)//2], len(env)),
         scipy.signal.resample(env[len(env)//4::len(env)//2][::-1], len(env)),
         scipy.signal.resample(env[len(env)//4::len(env)//2], len(env)*2), 
-        scipy.signal.resample(env[len(env)//4::len(env)//2][::-1], len(env)*2)
+        scipy.signal.resample(env[len(env)//4::len(env)//2][::-1], len(env)*2),
+        scipy.signal.resample(env[len(env)//4::len(env)//2], len(env)*4), 
+        scipy.signal.resample(env[len(env)//4::len(env)//2][::-1], len(env)*4)
     ])
     new_env /= np.min(new_env)
     new_env = np.clip(np.abs(new_env), -1, 1)
@@ -175,7 +177,7 @@ class HighFrequencyRestorer(QObject):
         if lowpass != -1:
             pass
         else:
-            indices = np.where(abs(mid_ffted_full) < 0.000000001)[0]
+            indices = np.where(abs(mid_ffted_full) < 0.0000001)[0]
             if len(indices) > 0:
                 for i in range(len(indices)):
                     if indices[0] < 16:
@@ -322,12 +324,12 @@ class HighFrequencyRestorer(QObject):
             mid_noise[:,i] = mid_noise_frame; side_noise[:,i] = side_noise_frame
             mid_harm[:,i][:lowpass] = 0; side_harm[:,i][:lowpass] = 0
             mid_noise[:,i][:lowpass] = 0; side_noise[:,i][:lowpass] = 0
-            start_fade_len = lowpass; fade_len = frame_length // 2 - start_fade_len
-            if fade_len > 0:
-                fade_curve = np.linspace(1,0,fade_len) ** 2.5
-                mid_harm[:,i][start_fade_len:] *= fade_curve; side_harm[:,i][start_fade_len:] *= fade_curve
-                mid_noise[:,i][start_fade_len:] *= fade_curve; side_noise[:,i][start_fade_len:] *= fade_curve
             try:
+                start_fade_len = lowpass; fade_len = frame_length // 2 - start_fade_len
+                if fade_len > 0:
+                    fade_curve = np.linspace(1,0,fade_len) ** 2.5
+                    mid_harm[:,i][start_fade_len:] *= fade_curve; side_harm[:,i][start_fade_len:] *= fade_curve
+                    mid_noise[:,i][start_fade_len:] *= fade_curve; side_noise[:,i][start_fade_len:] *= fade_curve
                 if transient_frames[i] == True:
                     mid_noise[:,i] *= 1
             except:
