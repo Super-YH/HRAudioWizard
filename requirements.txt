@@ -1,7 +1,17 @@
-numpy
-scipy
-librosa
-pyaudio
-soundfile
-PyQt6
-tqdm
+# HRAudioWizard Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core audio processing
+numpy>=1.21.0
+scipy>=1.7.0
+librosa>=0.9.0
+soundfile>=0.10.0
+
+# JIT compilation for performance
+numba>=0.55.0
+
+# GUI
+flet>=0.20.0
+
+# Optional: LLVM for numba (usually auto-installed)
+# llvmlite>=0.38.0
