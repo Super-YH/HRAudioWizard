@@ -7,7 +7,6 @@ optimal dithering during quantization.
 
 import numpy as np
 from scipy.linalg import solve_toeplitz
-from PyQt6.QtCore import QObject, pyqtSignal
 
 # Import with fallback for both direct and package execution
 try:
