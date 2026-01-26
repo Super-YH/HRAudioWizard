@@ -49,7 +49,7 @@ class HFPv3Config:
     noise_weight: float = 0.85
     
     # Transient handling
-    transient_threshold: float = 2.0
+    transient_threshold: float = 1.0
     
     # Cepstral settings
     cepstral_lifter_quefrency: int = 80
@@ -538,13 +538,20 @@ class HighFrequencyRestorerV3:
                     scale = np.clip(scale, 0.1, 5.0)
                     hf_content[cutoff_bin:] *= scale
             
-            # Crossfade
+            # Crossfade - start BEFORE cutoff to ensure smooth transition
+            # This prevents the gap when original content drops off sharply
             fade_len = min(64, n_bins - cutoff_bin)
+            pre_fade = min(48, cutoff_bin)  # Start 48 bins before cutoff (~2kHz)
             if fade_len > 0:
-                t = np.linspace(0, 1, fade_len)
+                # Extended crossfade region
+                total_fade = pre_fade + fade_len
+                t = np.linspace(0, 1, total_fade)
                 alpha = 0.5 * (1 - np.cos(np.pi * t))
-                start = cutoff_bin
+                
+                start = cutoff_bin - pre_fade
                 end = cutoff_bin + fade_len
+                
+                # Blend: use more of original at start, more of synthesized at end
                 frame_mag[start:end] = frame_mag[start:end] * (1 - alpha) + hf_content[start:end] * alpha
                 if end < n_bins:
                     frame_mag[end:] = hf_content[end:]
@@ -649,16 +656,19 @@ class HighFrequencyRestorerV3:
         """Synthesize high frequency content."""
         hf_content = np.zeros(total_bins)
         
-        # Base noise
-        noise_hf = self._synthesize_noise_hf(low_freq_mag, cutoff_bin, total_bins,
+        # Extend synthesis region slightly below cutoff for smooth blending
+        synth_start = max(0, cutoff_bin - 48)  # Start 48 bins before cutoff
+        
+        # Base noise - extend below cutoff
+        noise_hf = self._synthesize_noise_hf(low_freq_mag, synth_start, total_bins,
                                               analysis.cepstral_envelope if analysis.is_voiced else None)
         hf_content = noise_hf.copy()
         
         if analysis.is_transient:
-            transient_hf = self._synthesize_transient_hf(low_freq_mag, cutoff_bin, total_bins)
+            transient_hf = self._synthesize_transient_hf(low_freq_mag, synth_start, total_bins)
             hf_content = np.maximum(hf_content, transient_hf * 1.5)
         elif analysis.is_voiced and len(analysis.harmonic_amplitudes) >= 2:
-            harmonic_hf = self._synthesize_harmonic_hf(analysis, low_freq_mag, cutoff_bin, total_bins)
+            harmonic_hf = self._synthesize_harmonic_hf(analysis, low_freq_mag, synth_start, total_bins)
             hf_content = hf_content + self.config.harmonic_weight * harmonic_hf
         
         hf_content = self._apply_hf_rolloff(hf_content, cutoff_bin, total_bins)
