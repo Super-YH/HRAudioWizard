@@ -14,12 +14,14 @@ try:
     from .localization import Localization
     from .hfr import HighFrequencyRestorer
     from .hfp_v1 import HighFrequencyRestorerV1
+    from .hfp_v3 import HighFrequencyRestorerV3
     from .noise_shaper import RDONoiseShaper
     from .resampler import IntelligentRDOResampler
 except ImportError:
     from localization import Localization
     from hfr import HighFrequencyRestorer
     from hfp_v1 import HighFrequencyRestorerV1
+    from hfp_v3 import HighFrequencyRestorerV3
     from noise_shaper import RDONoiseShaper
     from resampler import IntelligentRDOResampler
 
@@ -225,6 +227,7 @@ class AudioWizardApp:
             options=[
                 ft.dropdown.Option("HFPv2 (MDCT-based)"),
                 ft.dropdown.Option("HFP V1 (STFT-based)"),
+                ft.dropdown.Option("HFP V3 (LPC-based)"),
             ],
             width=200,
             border_color="#6c5ce7",
@@ -536,9 +539,12 @@ class AudioWizardApp:
                     self._log(self.loc.get("hfr_processing"))
                     lowpass = int(self.lowpass_field.value) if self.lowpass_field.value != "" else -1
                     
-                    if "V1" in self.algo_dropdown.value:
+                    if "V3" in self.algo_dropdown.value:
+                        restorer = HighFrequencyRestorerV3()
+                        restorer.progress_callback = self._update_progress
+                        processed = restorer.run_hfp_v3(processed, sr, lowpass, self.compressed_check.value)
+                    elif "V1" in self.algo_dropdown.value:
                         restorer = HighFrequencyRestorerV1()
-                        # Set progress callback for V1
                         restorer.progress_callback = self._update_progress
                         processed = restorer.run_hfp_v1(processed, sr, lowpass, self.compressed_check.value)
                     else:

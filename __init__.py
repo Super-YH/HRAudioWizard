@@ -28,6 +28,7 @@ from .spectra_utils import OVERTONE, connect_spectra_smooth, flatten_spectrum, g
 from .psychoacoustic import AdvancedPsychoacousticModel
 from .hfr import HighFrequencyRestorer
 from .hfp_v1 import HighFrequencyRestorerV1
+from .hfp_v3 import HighFrequencyRestorerV3
 from .noise_shaper import RDONoiseShaper
 from .resampler import IntelligentRDOResampler
 from .localization import Localization, STRINGS
@@ -50,6 +51,7 @@ __all__ = [
     # Processing
     "HighFrequencyRestorer",
     "HighFrequencyRestorerV1",
+    "HighFrequencyRestorerV3",
     "RDONoiseShaper", 
     "IntelligentRDOResampler",
     
